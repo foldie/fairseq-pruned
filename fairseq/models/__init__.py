@@ -8,6 +8,7 @@ import argparse
 import importlib
 import os
 
+
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.utils import merge_with_parent, populate_dataclass
 from hydra.core.config_store import ConfigStore
@@ -46,7 +47,7 @@ __all__ = [
     "FairseqIncrementalDecoder",
     "FairseqLanguageModel",
     "FairseqModel",
-    "FairseqMultiModel",
+    "FairseqMultiModel"
 ]
 
 

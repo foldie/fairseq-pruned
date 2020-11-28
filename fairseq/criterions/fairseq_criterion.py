@@ -5,11 +5,13 @@
 
 import inspect
 from typing import Any, Dict, List
+import sys
 
 from fairseq import metrics, utils
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.utils import gen_parser_from_dataclass
 from torch.nn.modules.loss import _Loss
+
 
 
 class FairseqCriterion(_Loss):

@@ -56,7 +56,9 @@ def DistributedFairseqModel(args, model, process_group):
         if "check_reduction" in inspect.getargspec(ddp_class)[0]:
             init_kwargs["check_reduction"] = True
         if "find_unused_parameters" in inspect.getargspec(ddp_class)[0]:
+            # TURN UNUSED OFF
             init_kwargs["find_unused_parameters"] = args.find_unused_parameters
+            #init_kwargs["find_unused_parameters"] = True
     elif args.distributed_wrapper == "DDP" and args.ddp_backend == "no_c10d":
         ddp_class = LegacyDistributedDataParallel
         init_kwargs = dict(

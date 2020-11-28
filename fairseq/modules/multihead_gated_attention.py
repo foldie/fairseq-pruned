@@ -5,6 +5,7 @@
 
 import math
 from typing import Dict, Optional, Tuple
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -14,10 +15,18 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor, nn
 from torch.nn import Parameter
+from fairseq.f_utils import add_to_log
+from torch.autograd import Variable
 
+#  This class was modified by me to embed the gates for L_0 regularization
+#  Non-optional arguments temperature, lamba and prior_prec were added.
+#  An optional argument open gates (defaults to False) was also added to bypass
+#  the gating mechanism and to be able to change gate behavour during training.
+#  These arguments are required because the class passes them onto the 
+#  Concrete heads. 
 
 @with_incremental_state
-class MultiheadAttention(nn.Module):
+class MultiheadGatedAttention(nn.Module):
     """Multi-headed attention.
 
     See "Attention Is All You Need" for more details.
@@ -27,6 +36,10 @@ class MultiheadAttention(nn.Module):
         self,
         embed_dim,
         num_heads,
+        temperature, 
+        lamba,
+        prior_prec,
+        open_gates = False,
         kdim=None,
         vdim=None,
         dropout=0.0,
@@ -82,12 +95,19 @@ class MultiheadAttention(nn.Module):
         else:
             self.bias_k = self.bias_v = None
 
+        # The following two lines regulate the behavour of the
+        # gating mechanism and these were added by me 
+
+        self.open_gates = open_gates
+        self.mask = ConcreteGateLayer(temperature, lamba, prior_prec, num_heads)
+        
         self.add_zero_attn = add_zero_attn
 
         self.reset_parameters()
 
         self.onnx_trace = False
         self.tpu = False
+        self.penalty = 0
 
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
@@ -147,7 +167,6 @@ class MultiheadAttention(nn.Module):
         """
         if need_head_weights:
             need_weights = True
-
         tgt_len, bsz, embed_dim = query.size()
         assert embed_dim == self.embed_dim
         assert list(query.size()) == [tgt_len, bsz, embed_dim]
@@ -196,7 +215,6 @@ class MultiheadAttention(nn.Module):
                     key = value = None
         else:
             saved_state = None
-
         if self.self_attention:
             q = self.q_proj(query)
             k = self.k_proj(query)
@@ -210,14 +228,12 @@ class MultiheadAttention(nn.Module):
             else:
                 k = self.k_proj(key)
                 v = self.v_proj(key)
-
         else:
             assert key is not None and value is not None
             q = self.q_proj(query)
             k = self.k_proj(key)
             v = self.v_proj(value)
         q *= self.scaling
-
         if self.bias_k is not None:
             assert self.bias_v is not None
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
@@ -234,12 +250,12 @@ class MultiheadAttention(nn.Module):
                     ],
                     dim=1,
                 )
-
         q = (
             q.contiguous()
             .view(tgt_len, bsz * self.num_heads, self.head_dim)
             .transpose(0, 1)
         )
+
         if k is not None:
             k = (
                 k.contiguous()
@@ -252,6 +268,7 @@ class MultiheadAttention(nn.Module):
                 .view(-1, bsz * self.num_heads, self.head_dim)
                 .transpose(0, 1)
             )
+
 
         if saved_state is not None:
             # saved states are stored with shape (bsz, num_heads, seq_len, head_dim)
@@ -277,7 +294,7 @@ class MultiheadAttention(nn.Module):
             if "prev_key_padding_mask" in saved_state:
                 prev_key_padding_mask = saved_state["prev_key_padding_mask"]
             assert k is not None and v is not None
-            key_padding_mask = MultiheadAttention._append_prev_key_padding_mask(
+            key_padding_mask = MultiheadGatedAttention._append_prev_key_padding_mask(
                 key_padding_mask=key_padding_mask,
                 prev_key_padding_mask=prev_key_padding_mask,
                 batch_size=bsz,
@@ -296,6 +313,7 @@ class MultiheadAttention(nn.Module):
 
         # This is part of a workaround to get around fork/join parallelism
         # not supporting Optional types.
+
         if key_padding_mask is not None and key_padding_mask.dim() == 0:
             key_padding_mask = None
 
@@ -322,10 +340,8 @@ class MultiheadAttention(nn.Module):
                     ],
                     dim=1,
                 )
-
         attn_weights = torch.bmm(q, k.transpose(1, 2))
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
-
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
         if attn_mask is not None:
@@ -359,6 +375,13 @@ class MultiheadAttention(nn.Module):
 
         assert v is not None
         attn = torch.bmm(attn_probs, v)
+
+        # This line was inserted to apply the gated values to the
+        # original attention weights
+        # ========================  gate  ========================
+        if not self.open_gates:
+            attn, gates = self.mask(attn, bsz, tgt_len, self.head_dim, self.num_heads)
+        # ========================  gate  ========================
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
         if self.onnx_trace and attn.size(1) == 1:
             # when ONNX tracing a single decoder step (sequence length == 1)
@@ -375,6 +398,17 @@ class MultiheadAttention(nn.Module):
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
+        if not self.open_gates:
+            for idx,gate in enumerate(gates):
+                if gate == 0:
+                    attn_weights[idx] = attn_weights[idx] * 0
+        
+        # the following code was originally published with the paper: 
+        # Attention is Not Only a Weight: Analyzing Transformers with Vector Norms
+        # https://arxiv.org/abs/2004.10102
+        # https://github.com/gorokoba560/norm-analysis-of-transformer
+        # used without modification to report on attention norms
+
         with torch.no_grad():
             # Reshape Value vectors into (bsz, src_len, num_heads, 1, head_dim)
             v = v.contiguous().view(bsz, self.num_heads, -1, 1, self.head_dim).transpose(1, 2)
@@ -407,7 +441,10 @@ class MultiheadAttention(nn.Module):
         # transformed_vector_norm = 0
         # weighted_vector_norm = 0
         # summed_weighted_vector_norm = 0
-        return attn, attn_weights, {'transformed_vector':transformed_vector_norm, 'weighted_vector': weighted_vector_norm, 'summed_weighted': summed_weighted_vector_norm}
+        return attn, attn_weights, {'transformed_vector': transformed_vector_norm, 'weighted_vector': weighted_vector_norm, 'summed_weighted': summed_weighted_vector_norm}
+    
+   
+
 
     @staticmethod
     def _append_prev_key_padding_mask(
@@ -517,3 +554,84 @@ class MultiheadAttention(nn.Module):
 
         for key, value in items_to_add.items():
             state_dict[key] = value
+
+# This code was added by me to implement the stochastic gates.
+
+class ConcreteGateLayer(nn.Module):
+
+    def __init__(self, temperature, lamba, prior_prec, shape,  limits = (-0.1,1.1)):
+        """Class implemented based on the code by Elena Voita available at: https://github.com/lena-voita/the-story-of-heads
+        And the original code by Christos Louizos is available at: https://github.com/AMLab-Amsterdam/L0_regularization
+        Implements the non-negative stochastic gates that regulate whether the weights are set to zero.
+        temperature: a parameter to the distribution phi
+        lamba: argument to the penalty coefficient
+        prior_prec:argument to the penalty coefficient
+        shape: the shape of the input, specifically the number of attention heads in the model
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.stretch_limits = limits
+        self.eps = 1e-6
+        self.sigmoid = torch.nn.Sigmoid()
+        # The parameter that is going to be updated.
+        self.loga = Parameter(nn.init.normal_(torch.Tensor(shape)))
+        self.floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
+        self.htanh = torch.nn.Hardtanh(max_val = 1.0, min_val = 0)
+        self.lamba = lamba
+        self.prior_prec = prior_prec
+        self.reg_value = 0
+
+
+    def constrain_parameters(self):
+        self.qz_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
+
+    def reg(self, attn, tgt_len, bsz, num_heads):
+        """Expected L0 norm under the stochastic gates."""
+        # Equation 6 in the original paper by Louizos defines the q(z!=0|\theta) distribution as below:
+        penalty = torch.sum(- (.5 * self.prior_prec * attn.pow(2)) - self.lamba, 2) # the lambda penalty
+        logpw = torch.sum((torch.repeat_interleave((1 - self.cdf_qz(0)), tgt_len).repeat(bsz)).reshape(bsz*num_heads,tgt_len) * penalty)
+        self.reg_value = logpw
+        return logpw
+
+    def cdf_qz(self, x):
+        """Implements the CDF of the 'stretched' concrete distribution"""
+        limit_a, limit_b = self.stretch_limits
+        xn = (x - limit_a) / (limit_b - limit_a)
+        logits = math.log(xn) - math.log(1 - xn)
+        return F.sigmoid(logits * self.temperature - self.loga).clamp(min=self.eps, max=1 - self.eps)
+
+    def quantile_concrete(self, size): 
+        """Implements the equation to get the estimator for the final parameters
+        under a hard concrete gate. This function is used at training time."""
+        # Equation 10 in the original paper by Louizos
+        # We first stretch the distribution s (here y) to the (limit_a - limit_b)
+        # (limit_a - limit_b) interval and then apply the 
+        # hard sigmoid on its random samples
+        limit_a, limit_b = self.stretch_limits
+        #Uniform random numbers (noise) for the concrete distribution
+        eps = self.floatTensor(size).uniform_(self.eps, 1-self.eps)
+        eps = Variable(eps)
+        y = F.sigmoid((torch.log(eps) - torch.log(1 - eps) + self.loga) / self.lmd)
+        # s_overline
+        z = y * (limit_b - limit_a) + limit_a
+        return F.hardtanh(z, min_val=0, max_val=1)
+
+    def sample_z(self, in_features):
+        """Sample the hard-concrete gates for training and use a deterministic value for testing"""
+        if self.training:
+            z = self.quantile_concrete(self.loga.shape)
+            return z
+        else:
+            # Equation 13 in the original paper by Louizos
+            limit_a, limit_b = self.stretch_limits
+            pi = F.sigmoid(self.loga)
+            return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
+
+    def forward(self, weights, bsz, tgt_len, head_dim, num_heads):
+        gates = self.sample_z(weights.shape)
+        self.reg(weights, tgt_len, bsz, num_heads)
+        gates_mask = torch.repeat_interleave(gates, head_dim * tgt_len, dim=-1).repeat(bsz)
+        out = weights * gates_mask.view(weights.shape)
+        return out, gates
+
+ # This is the end of my contributions to the code in this file

@@ -31,9 +31,8 @@ logger = logging.getLogger("fairseq_cli.preprocess")
 
 def main(args):
     utils.import_user_module(args)
-
+    print(args)
     os.makedirs(args.destdir, exist_ok=True)
-
     logger.addHandler(
         logging.FileHandler(
             filename=os.path.join(args.destdir, "preprocess.log"),
@@ -42,7 +41,6 @@ def main(args):
     logger.info(args)
 
     task = tasks.get_task(args.task)
-
     def train_path(lang):
         return "{}{}".format(args.trainpref, ("." + lang) if lang else "")
 
@@ -74,7 +72,6 @@ def main(args):
         raise FileExistsError(dict_path(args.source_lang))
     if target and not args.tgtdict and os.path.exists(dict_path(args.target_lang)):
         raise FileExistsError(dict_path(args.target_lang))
-
     if args.joined_dictionary:
         assert (
             not args.srcdict or not args.tgtdict

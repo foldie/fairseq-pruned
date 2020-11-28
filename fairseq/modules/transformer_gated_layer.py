@@ -3,19 +3,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+from re import S
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 from fairseq import utils
-from fairseq.modules import LayerNorm, MultiheadAttention
+from fairseq.modules import LayerNorm, MultiheadGatedAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor
+import math
 from fairseq.f_utils import pickle_tensor
 
+# This is a class defined by me that adds a few changes to the original 
+# Encoder layer in order to implement the stochastic gating mechanism
 
-class TransformerEncoderLayer(nn.Module):
+class TransformerGatedEncoderLayer(nn.Module):
     """Encoder layer block.
 
     In the original paper each operation (multi-head attention or FFN) is
@@ -30,14 +34,6 @@ class TransformerEncoderLayer(nn.Module):
         args (argparse.Namespace): parsed command-line arguments
     """
 
-    # @staticmethod
-    # def add_args(parser):
-    #     """Add criterion-specific arguments to the parser."""
-    #     parser.add_argument('--save_tensors', action="store_true", default=False,
-    #                         help='save tensors for visualisation later')
-    #     parser.add_argument('--tensor-dir', type=str, default='')
-                            
-
     def __init__(self, args, index):
         super().__init__()
         self.index = index
@@ -45,6 +41,10 @@ class TransformerEncoderLayer(nn.Module):
         self.quant_noise = getattr(args, 'quant_noise_pq', 0)
         self.quant_noise_block_size = getattr(args, 'quant_noise_pq_block_size', 8) or 8
         self.self_attn = self.build_self_attention(self.embed_dim, args)
+        self.open_gates = getattr(args, 'open_gates')
+        if not self.open_gates:
+            self.self_attn.mask = self.self_attn.mask
+            self.self_attn.mask.loga.data.normal_(math.log(1 - 0.5) - math.log(0.5), 1e-2)
         self.self_attn_layer_norm = LayerNorm(self.embed_dim)
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
@@ -73,8 +73,27 @@ class TransformerEncoderLayer(nn.Module):
             self.quant_noise_block_size,
         )
         self.final_layer_norm = LayerNorm(self.embed_dim)
-        self.counter = 0
+
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        # These are specific values added by me to regulate saving tensors
+        # and opening gates.
+
         self.save_tensors = getattr(args, 'save_tensors')
+        if self.save_tensors:
+            self.tensor_dir = getattr(args, 'tensor_dir')
+        self.open_gates = getattr(args, 'open_gates')
+
+    #Added the following function to return its regularisation value
+    #This gets added to the loss in gated_cross_entropy.py file
+
+    def compute_reg(self):
+        """Computes the penalty and resets the value in anticipation
+        of the next passes through the network"""
+        latest_pentalty = self.self_attn.mask.reg_value
+        self.self_attn.mask.reg_value = 0
+        return latest_pentalty
+    
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(
@@ -86,15 +105,25 @@ class TransformerEncoderLayer(nn.Module):
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
         )
 
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+    # Building the gated attention instead of the regular attention.
+
     def build_self_attention(self, embed_dim, args):
-        return MultiheadAttention(
+        return MultiheadGatedAttention(
             embed_dim,
             args.encoder_attention_heads,
+            args.temperature,
+            args.lamba,
+            args.prior_prec,
+            open_gates = args.open_gates,
             dropout=args.attention_dropout,
             self_attention=True,
             q_noise=self.quant_noise,
             qn_block_size=self.quant_noise_block_size,
         )
+
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
     def residual_connection(self, x, residual):
         return residual + x
@@ -113,7 +142,7 @@ class TransformerEncoderLayer(nn.Module):
                     state_dict["{}.{}.{}".format(name, new, m)] = state_dict[k]
                     del state_dict[k]
 
-    def forward(self, x, encoder_padding_mask, src_tokens, attn_mask: Optional[Tensor] = None):
+    def forward(self, x, encoder_padding_mask, src_tokens, attn_mask: Optional[Tensor] = None, save_tensors = False):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -136,11 +165,10 @@ class TransformerEncoderLayer(nn.Module):
         # will become -inf, which results in NaN in model parameters
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
-
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
-        x, aw, norms = self.self_attn(
+        x, attn_w, norms = self.self_attn(
             query=x,
             key=x,
             value=x,
@@ -162,12 +190,20 @@ class TransformerEncoderLayer(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-        self.save_tensors = False
+
+        # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         if self.save_tensors == True:
             self.counter += 1
-            pickle_tensor(norms, "saved_tensors/de/2500000/fromscratch/norm" + str(self.index+1) +'_'+ str(self.counter) + ".pt")
-            pickle_tensor(src_tokens, "saved_tensors/de/2500000/fromscratch/tokens" + str(self.index+1) +'_'+ str(self.counter) + ".pt")
-            pickle_tensor(aw, "saved_tensors/de/2500000/fromscratch/attention"+  str(self.index+1) +'_'+ str(self.counter) + ".pt")
+
+            # This is code added by me. Here if save_tensors is true the attention weights
+            # the source tokens (the sentence) and the norm of the attention is saved.
+
+            pickle_tensor(norms, tensor_dir + "/norm" + str(self.index+1) +'_'+ str(self.counter) + ".pt")
+            pickle_tensor(src_tokens, tensor_dir + "/tokens" + str(self.index+1) +'_'+ str(self.counter) + ".pt")
+            pickle_tensor(attn_w, tensor_dir + "/attention" + str(self.index+1) +'_'+ str(self.counter)+ ".pt")
+
+            # This is the end of my contributions to this file.
+            # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         return x
 
 
@@ -319,7 +355,6 @@ class TransformerDecoderLayer(nn.Module):
         """
         if need_head_weights:
             need_attn = True
-
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
@@ -357,8 +392,7 @@ class TransformerDecoderLayer(nn.Module):
             y = torch.cat((encoder_out, x), dim=0)
         else:
             y = x
-
-        x, attn, _ = self.self_attn(
+        x, attn = self.self_attn(
             query=x,
             key=y,
             value=y,
@@ -387,7 +421,7 @@ class TransformerDecoderLayer(nn.Module):
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
 
-            x, attn, _ = self.encoder_attn(
+            x, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,
                 value=encoder_out,

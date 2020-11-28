@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
     from fairseq import meters
+    print("save_checkpoint called")
 
     # only one worker should attempt to create the required dir
     if cfg.distributed_rank == 0:
@@ -39,11 +40,13 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
         save_checkpoint.best = best_function(val_loss, prev_best)
 
     if cfg.no_save:
+        print("Not saving checkpoint since saving is disabled")
         return
 
     trainer.consolidate_optimizer()
 
     if not trainer.is_data_parallel_master:
+        print("Not data parallel master, not saving")
         return
 
     def is_better(a, b):
@@ -83,11 +86,13 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
     extra_state = {"train_iterator": epoch_itr.state_dict(), "val_loss": val_loss}
     if hasattr(save_checkpoint, "best"):
         extra_state.update({"best": save_checkpoint.best})
-
+    for checkpoint_file, result in checkpoint_conds.items():
+        print(f"Condition for {checkpoint_file} is {result}")
     checkpoints = [
         os.path.join(cfg.save_dir, fn) for fn, cond in checkpoint_conds.items() if cond
     ]
     if len(checkpoints) > 0:
+        print(f"saving {checkpoints}")
         trainer.save_checkpoint(checkpoints[0], extra_state)
         for cp in checkpoints[1:]:
             PathManager.copy(checkpoints[0], cp, overwrite=True)

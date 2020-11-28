@@ -17,10 +17,6 @@ BPE_TOKENS=40000
 
 URLS=(
     "http://statmt.org/wmt13/training-parallel-europarl-v7.tgz"
-    "http://statmt.org/wmt13/training-parallel-commoncrawl.tgz"
-    "http://data.statmt.org/wmt17/translation-task/training-parallel-nc-v12.tgz"
-    "http://data.statmt.org/wmt17/translation-task/dev.tgz"
-    "http://statmt.org/wmt14/test-full.tgz"
 )
 FILES=(
     "training-parallel-europarl-v7.tgz"
@@ -34,6 +30,7 @@ CORPORA=(
     "commoncrawl.de-en"
     "training/news-commentary-v12.de-en"
 )
+
 
 # This will make the dataset compatible to the one used in "Convolutional Sequence to Sequence Learning"
 # https://arxiv.org/abs/1705.03122

@@ -6,7 +6,6 @@
 """
 Train a new model on one or across multiple GPUs.
 """
-
 import argparse
 import logging
 import math
@@ -31,6 +30,8 @@ from fairseq.logging import meters, metrics, progress_bar
 from fairseq.model_parallel.megatron_trainer import MegatronTrainer
 from omegaconf import DictConfig
 from fairseq.trainer import Trainer
+
+
 
 
 logging.basicConfig(
@@ -72,6 +73,7 @@ def main(cfg: DictConfig) -> None:
 
     # Build model and criterion
     model = task.build_model(cfg.model)
+
     criterion = task.build_criterion(cfg.criterion)
     logger.info(model)
     logger.info("task: {}".format(task.__class__.__name__))
@@ -216,7 +218,10 @@ def train(
         with metrics.aggregate("train_inner"), torch.autograd.profiler.record_function(
             "train_step-%d" % i
         ):
+            #turn-off training
             log_output = trainer.train_step(samples)
+            #log_output = None
+            #pass
 
         if log_output is not None:  # not OOM, overflow, ...
             # log mid-epoch stats
@@ -277,11 +282,12 @@ def validate_and_save(
             and num_updates % cfg.dataset.validate_interval_updates == 0
         )
     ) and not cfg.dataset.disable_validation
-
     # Validate
     valid_losses = [None]
     if do_validate:
+        print("validating")
         valid_losses = validate(cfg, trainer, task, epoch_itr, valid_subsets)
+        print("done validating")
 
     # Stopping conditions
     should_stop = (
@@ -381,7 +387,6 @@ def cli_main(
 ) -> None:
     parser = options.get_training_parser()
     args = options.parse_args_and_arch(parser, modify_parser=modify_parser)
-
     cfg = convert_namespace_to_omegaconf(args)
 
     if args.profile:

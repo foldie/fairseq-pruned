@@ -139,6 +139,7 @@ def _main(cfg: DictConfig, output_file):
     align_dict = utils.load_align_dict(cfg.generation.replace_unk)
 
     # Load dataset (possibly sharded)
+    print("Using dataset:", cfg.dataset.gen_subset)
     itr = task.get_batch_iterator(
         dataset=task.dataset(cfg.dataset.gen_subset),
         max_tokens=cfg.dataset.max_tokens,

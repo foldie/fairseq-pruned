@@ -2,16 +2,21 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+import numpy
 import torch
 from fairseq import utils
 from fairseq.dataclass.utils import gen_parser_from_dataclass
+import matplotlib.pyplot as plt
+import torch
+import numpy as np
+from matplotlib.lines import Line2D
 
 
 class FairseqOptimizer(object):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.counter = 0
 
     @classmethod
     def add_args(cls, parser):
@@ -93,6 +98,72 @@ class FairseqOptimizer(object):
     def backward(self, loss):
         """Computes the sum of gradients of the given tensor w.r.t. graph leaves."""
         loss.backward()
+
+    def plot_grad_flow(self, model):
+        '''Plots the gradients flowing through different layers in the net during training.
+        Can be used for checking for possible gradient vanishing / exploding problems.
+
+        Usage: Plug this function in Trainer class after loss.backwards() as
+        "plot_grad_flow(self.model.named_parameters())" to visualize the gradient flow'''
+        ave_grads = []
+        max_grads = []
+        shapes = []
+        layers = []
+        names = []
+        for n, p in model.named_parameters():
+            if "bias" not in n and "encoder" in n:
+                if (p.requires_grad) and ("bias" not in n):
+                    layers.append(p)
+                    names.append(n)
+                    shapes.append(p.shape)
+                    ave_grads.append(p.grad.abs().mean())
+                    max_grads.append(p.grad.abs().max())
+                if "mask.loga" in n:
+                    print("mask_grad:", p.grad)
+                    print("p:",  p)
+        fig = plt.figure()
+        myplot = fig.add_subplot()
+        myplot.bar(np.arange(len(max_grads)), max_grads, alpha=1, lw=1, color="c")
+        myplot.bar(np.arange(len(max_grads)), ave_grads, alpha=1, lw=1, color="b")
+        myplot.hlines(0, 0, len(ave_grads) + 1, lw=2, color="k")
+        #plt.xticks(range(0,len(ave_grads), 1), layers, rotation="vertical")
+        #myplot.set_xticks(range(0, len(ave_grads), 10))#rotation="vertical")
+        myplot.set_xticks(range(0, len(ave_grads), 10), layers) #rotation="vertical")
+        myplot.set_xlim(left=0, right=len(ave_grads))
+        myplot.set_ylim(bottom=-0.01, top=0.25)  # zoom in on the lower gradient regions
+        myplot.set_xlabel("Layers")
+        myplot.set_ylabel("average gradient")
+        myplot.set_title("Gradient flow")
+        myplot.grid(True)
+        myplot.legend([Line2D([0], [0], color="c", lw=4),
+                    Line2D([0], [0], color="b", lw=4),
+                    Line2D([0], [0], color="k", lw=4)], ['max-gradient', 'mean-gradient', 'zero-gradient'])
+        #plt.show()
+        #name = "/mount/arbeitsdaten48/projekte/mt/foeldeni/pngs/grads/" + str(self.counter) + '.png'
+        #fig.savefig(name)
+        #plt.close(fig)
+
+    def plot_weight_histogram(self, model):
+        for n, p in model.named_parameters():
+            param = p.cpu()
+            param = param.detach().numpy()
+            fig = plt.figure()
+            myplot = fig.add_subplot()
+            myplot.hist(param, bins=numpy.arange(-0.25, 0.25, 0.01))
+            myplot.set_xlabel(n)
+            #plt.show()
+            name = "/mount/arbeitsdaten48/projekte/mt/foeldeni/pngs/weights/" + str(n) + str(self.counter) + '.png'
+            fig.savefig(name)
+            plt.close(fig)
+
+    def plot_loss(self):
+        fig = plt.figure()
+        myplot = fig.add_subplot()
+        myplot.plot(self.loss, linewidth=0.2)
+        myplot.set_xlabel('loss')
+        name = "/mount/arbeitsdaten48/projekte/mt/foeldeni/pngs/loss/" + str(self.counter) + '.png'
+        fig.savefig(name)
+        plt.close(fig)
 
     def all_reduce_grads(self, module):
         """Manually all-reduce gradients (if required)."""
