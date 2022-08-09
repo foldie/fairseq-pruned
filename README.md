@@ -7,7 +7,7 @@ My master project is an implementation of L<sub>0</sub> regularization in the Fa
 ## Files changed
 
 + [gated_transformer.py](https://github.com/foldie/fairseq-pruned/blob/master/fairseq/models/gated_transformer.py) is based on the transformer.py
-+ transformer_gated_layer.py](https://github.com/foldie/fairseq-pruned/blob/master/fairseq/modules/transformer_gated_layer.py) is based on the transformer_layer.py file.
++ [transformer_gated_layer.py](https://github.com/foldie/fairseq-pruned/blob/master/fairseq/modules/transformer_gated_layer.py) is based on the transformer_layer.py file.
 + [multihead_gated_attention.py](https://github.com/foldie/fairseq-pruned/blob/master/fairseq/modules/multihead_gated_attention.py) is based on the multihead_attention.py file
 + [gated_cross_entropy.py](https://github.com/foldie/fairseq-pruned/blob/master/fairseq/criterions/gated_cross_entropy.py) is based on the cross_entropy.py file
 
@@ -63,7 +63,7 @@ to restart training from an existing preprocessed data or checkpoint try running
 
 
 ## L<sub>0</sub> regularization
-L<sub>0</sub> regularization uses the reparameterization trick to construct a tractable alternative that approximates the combinatorial regularization term  $||\theta||_0 = \sum_{j=1}^{||\theta||}  I[\theta_j \neq 0]$
+L<sub>0</sub> regularization uses the reparameterization trick to construct a tractable alternative that approximates the combinatorial regularization term  $ ||\theta||_0 = \sum_{j=1}^{||\theta||}  I[\theta_j \neq 0] $.
 
 ## Experiments
 
